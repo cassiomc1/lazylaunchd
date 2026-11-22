@@ -17,6 +17,7 @@ from lazylaunchd.models import (
     ServiceScope,
     Severity,
     explain_exit_status,
+    short_exit_status,
 )
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "parse_launchctl_domain_services",
     "parse_launchctl_list",
     "parse_launchctl_print",
+    "short_exit_status",
 ]
 
 _DISABLED_LINE_RE = re.compile(r'^\s*"(?P<label>[^"]+)"\s*=>\s*(?P<state>disabled|enabled)\s*$')

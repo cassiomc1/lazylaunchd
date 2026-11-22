@@ -99,7 +99,7 @@ def _render_list(services: list[ServiceInfo], console: Console) -> None:
     table.add_column("State", no_wrap=True)
     table.add_column("Scope", no_wrap=True)
     table.add_column("PID", justify="right", no_wrap=True)
-    table.add_column("Exit", justify="right", no_wrap=True)
+    table.add_column("Exit", justify="left", no_wrap=True)
     table.add_column("Label", overflow="fold")
     table.add_column("Issues", justify="right", no_wrap=True)
 
@@ -114,7 +114,16 @@ def _render_list(services: list[ServiceInfo], console: Console) -> None:
 
     for svc in services:
         pid_str = str(svc.pid) if svc.pid else "-"
-        exit_str = str(svc.last_exit_status) if svc.last_exit_status is not None else "-"
+        code = svc.last_exit_status
+        exit_summary = svc.short_exit_summary
+        if code is None:
+            exit_text = Text(exit_summary, style="dim")
+        elif code == 0:
+            exit_text = Text(exit_summary, style="green")
+        elif code < 0:
+            exit_text = Text(exit_summary, style="bold yellow")
+        else:
+            exit_text = Text(exit_summary, style="bold red")
         errs = svc.error_count
         warns = svc.warning_count
         if errs:
@@ -128,9 +137,9 @@ def _render_list(services: list[ServiceInfo], console: Console) -> None:
 
         table.add_row(
             Text(svc.status_badge, style=state_styles[svc.state]),
-            svc.scope.label,
+            svc.scope.short_label,
             pid_str,
-            exit_str,
+            exit_text,
             svc.label,
             issue_text,
         )
