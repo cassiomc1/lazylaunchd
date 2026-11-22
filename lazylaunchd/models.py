@@ -160,6 +160,58 @@ def explain_exit_status(code: int | None, *, query_launchctl: bool = False) -> s
     return f"{code} (Non-zero exit)"
 
 
+_SHORT_EXIT_CODES: dict[int, str] = {
+    1: "1 ERR",
+    2: "2 ENOENT",
+    13: "13 EACCES",
+    64: "64 EX_USAGE",
+    65: "65 EX_DATA",
+    66: "66 EX_NOIN",
+    69: "69 EX_UNAV",
+    70: "70 EX_SOFT",
+    71: "71 EX_OSERR",
+    72: "72 EX_OSFILE",
+    73: "73 EX_CREAT",
+    74: "74 EX_IOERR",
+    75: "75 EX_TEMP",
+    77: "77 EX_NOPERM",
+    78: "78 EX_CONFIG",
+    126: "126 NO_EXEC",
+    127: "127 NOT_FOUND",
+    130: "130 SIGINT",
+    137: "137 SIGKILL",
+    143: "143 SIGTERM",
+}
+
+
+def short_exit_status(code: int | None) -> str:
+    """Return a compact decoded exit label suitable for list/table columns."""
+    if code is None:
+        return "-"
+    if code == 0:
+        return "0 OK"
+    if code < 0:
+        sig_num = abs(code)
+        try:
+            sig_name = signal.Signals(sig_num).name
+            return f"{code} {sig_name}"
+        except ValueError:
+            return f"{code} SIG{sig_num}"
+
+    if code in _SHORT_EXIT_CODES:
+        return _SHORT_EXIT_CODES[code]
+
+    if 128 < code < 192:
+        sig_num = code - 128
+        try:
+            sig_name = signal.Signals(sig_num).name
+            return f"{code} {sig_name}"
+        except ValueError:
+            pass
+
+    return str(code)
+
+
 @dataclass
 class ServiceInfo:
     """Normalized representation of a macOS LaunchAgent or LaunchDaemon."""
@@ -314,6 +366,10 @@ class ServiceInfo:
         return explain_exit_status(self.last_exit_status)
 
     @property
+    def short_exit_summary(self) -> str:
+        return short_exit_status(self.last_exit_status)
+
+    @property
     def service_target(self) -> str:
         return f"{self.domain_target}/{self.label}"
 
@@ -336,6 +392,7 @@ class ServiceInfo:
             "pid": self.pid,
             "last_exit_status": self.last_exit_status,
             "exit_summary": self.exit_summary,
+            "short_exit_summary": self.short_exit_summary,
             "disabled": self.is_disabled,
             "plist_path": str(self.plist_path) if self.plist_path else None,
             "program_command": self.program_command,

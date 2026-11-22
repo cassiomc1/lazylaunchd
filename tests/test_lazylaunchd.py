@@ -30,6 +30,7 @@ from lazylaunchd.core import (
     parse_launchctl_domain_services,
     parse_launchctl_list,
     parse_launchctl_print,
+    short_exit_status,
 )
 from lazylaunchd.diagnostics import diagnose_service
 from lazylaunchd.logs import read_service_logs, tail_file
@@ -152,6 +153,21 @@ def test_explain_exit_status() -> None:
     assert "SIGTERM" in explain_exit_status(-15)
     assert "EX_CONFIG" in explain_exit_status(78)
     assert "Command not found" in explain_exit_status(127)
+
+
+def test_short_exit_status() -> None:
+    assert short_exit_status(None) == "-"
+    assert short_exit_status(0) == "0 OK"
+    assert short_exit_status(-9) == "-9 SIGKILL"
+    assert short_exit_status(-11) == "-11 SIGSEGV"
+    assert short_exit_status(-15) == "-15 SIGTERM"
+    assert short_exit_status(2) == "2 ENOENT"
+    assert short_exit_status(13) == "13 EACCES"
+    assert short_exit_status(78) == "78 EX_CONFIG"
+    assert short_exit_status(126) == "126 NO_EXEC"
+    assert short_exit_status(127) == "127 NOT_FOUND"
+    assert short_exit_status(137) == "137 SIGKILL"
+    assert short_exit_status(42) == "42"
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +574,9 @@ def test_cli_demo_list_doctor_and_json(capsys: pytest.CaptureFixture[str]) -> No
     assert rc_list == 0
     out_list = capsys.readouterr().out
     assert "com.prtg.monitor" in out_list
+    assert "0 OK" in out_list
+    assert "127 NOT_FOUND" in out_list
+    assert "78 EX_CONFIG" in out_list
 
     rc_doc_ok = cli_main(["--demo", "--doctor", "com.prtg.monitor"])
     assert rc_doc_ok == 0
@@ -604,6 +623,21 @@ def test_tui_navigation_tabs_filters_and_actions() -> None:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             table = app.query_one("#service-table", DataTable)
+            assert table.row_count == len(build_demo_services())
+
+            # Verify decoded exit codes are rendered in the table's Exit column
+            exit_cells = [str(table.get_row_at(i)[3]) for i in range(table.row_count)]
+            assert "0 OK" in exit_cells
+            assert "127 NOT_FOUND" in exit_cells
+            assert "78 EX_CONFIG" in exit_cells
+
+            # Filtering by decoded exit reason works too
+            await pilot.press("/")
+            await pilot.press("E", "X", "_", "C", "O", "N", "F", "I", "G")
+            await pilot.pause()
+            assert table.row_count == 1
+            await pilot.press("escape")
+            await pilot.pause()
             assert table.row_count == len(build_demo_services())
 
             # Navigate down and switch tabs

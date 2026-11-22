@@ -91,13 +91,14 @@ def _state_cell(state: ServiceState) -> Text:
 
 def _exit_cell(svc: ServiceInfo) -> Text:
     code = svc.last_exit_status
+    summary = svc.short_exit_summary
     if code is None:
-        return Text("-", style="dim")
+        return Text(summary, style="dim")
     if code == 0:
-        return Text("0", style="green")
+        return Text(summary, style="green")
     if code < 0:
-        return Text(str(code), style="bold yellow")
-    return Text(str(code), style="bold red")
+        return Text(summary, style="bold yellow")
+    return Text(summary, style="bold red")
 
 
 def _primary_fix_or_path(svc: ServiceInfo) -> tuple[str, str] | None:
@@ -551,8 +552,8 @@ class LazyLaunchdApp(App[None]):
         height: 1fr;
     }
     #left-pane {
-        width: 46%;
-        min-width: 42;
+        width: 48%;
+        min-width: 48;
         border-right: solid #30363d;
         background: #0d1117;
     }
@@ -584,7 +585,7 @@ class LazyLaunchdApp(App[None]):
         background: #0d1117;
     }
     #right-pane {
-        width: 54%;
+        width: 52%;
         background: #0d1117;
     }
     #service-banner {
@@ -694,9 +695,9 @@ class LazyLaunchdApp(App[None]):
     def on_mount(self) -> None:
         table = self.query_one("#service-table", DataTable)
         table.add_column("State", width=7)
-        table.add_column("Scope", width=8)
-        table.add_column("PID", width=7)
-        table.add_column("Exit", width=6)
+        table.add_column("Scope", width=7)
+        table.add_column("PID", width=6)
+        table.add_column("Exit", width=13)
         table.add_column("Label")
 
         if not self.all_services:
@@ -740,6 +741,8 @@ class LazyLaunchdApp(App[None]):
                     str(svc.plist_path or ""),
                     " ".join(svc.program_command),
                     svc.scope.label,
+                    svc.short_exit_summary,
+                    svc.exit_summary,
                 ]
             ).lower()
             if q not in haystack:
