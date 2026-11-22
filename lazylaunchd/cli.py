@@ -15,7 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from lazylaunchd import __version__
-from lazylaunchd.core import build_demo_services, discover_services
+from lazylaunchd.core import build_demo_services, discover_services, refresh_service_diagnostics
 from lazylaunchd.models import ServiceInfo, ServiceScope, ServiceState, Severity
 
 
@@ -249,6 +249,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.doctor is not None:
             targets = _select_doctor_targets(services, args.doctor)
+            if not args.demo:
+                if args.doctor:
+                    for svc in targets:
+                        refresh_service_diagnostics(svc)
+                else:
+                    for svc in services:
+                        if svc.loaded and svc.pid is None and svc.plist_path is not None:
+                            refresh_service_diagnostics(svc)
+                    targets = _select_doctor_targets(services, args.doctor)
             if args.json:
                 if args.doctor and not targets:
                     print(json.dumps({"error": f"No service matching '{args.doctor}'"}, indent=2))
