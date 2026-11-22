@@ -30,6 +30,7 @@ from lazylaunchd.core import (
     parse_launchctl_domain_services,
     parse_launchctl_list,
     parse_launchctl_print,
+    refresh_service_diagnostics,
     short_exit_status,
 )
 from lazylaunchd.diagnostics import diagnose_service
@@ -465,6 +466,149 @@ def test_diagnostics_healthy_and_no_trigger(tmp_path: Path) -> None:
     assert diags[0].severity == Severity.OK
 
 
+def test_diagnostics_distinguishes_waiting_vs_failed_no_pid(tmp_path: Path) -> None:
+    exe = _make_executable(tmp_path / "job.sh")
+
+    # 1. Loaded, no PID, scheduled via StartCalendarInterval, 0 runs -> WAITING_FOR_FIRST_TRIGGER (INFO + OK)
+    p_wait = _write_plist(
+        tmp_path / "com.test.waiting.plist",
+        {
+            "Label": "com.test.waiting",
+            "ProgramArguments": [str(exe)],
+            "StartCalendarInterval": {"Hour": 3, "Minute": 0},
+        },
+    )
+    s_wait = ServiceInfo(
+        label="com.test.waiting",
+        scope=ServiceScope.USER_AGENT,
+        domain_target="gui/501",
+        plist_path=p_wait,
+        pid=None,
+        last_exit_status=None,
+        loaded=True,
+        plist_data=plistlib.loads(p_wait.read_bytes()),
+        runtime_details={"state": "not running", "runs": 0, "last exit code": "(never exited)"},
+    )
+    s_wait.diagnostics = diagnose_service(s_wait, current_uid=os.getuid())
+    assert [d.code for d in s_wait.diagnostics] == ["WAITING_FOR_FIRST_TRIGGER", "SERVICE_HEALTHY"]
+    assert s_wait.diagnostics[0].severity == Severity.INFO
+    assert s_wait.state == ServiceState.LOADED
+
+    # 2. Loaded, no PID, completed 12 clean runs -> SERVICE_HEALTHY mentioning 12 run(s)
+    s_idle = ServiceInfo(
+        label="com.test.waiting",
+        scope=ServiceScope.USER_AGENT,
+        domain_target="gui/501",
+        plist_path=p_wait,
+        pid=None,
+        last_exit_status=0,
+        loaded=True,
+        plist_data=plistlib.loads(p_wait.read_bytes()),
+        runtime_details={"state": "not running", "runs": 12, "last exit code": 0},
+    )
+    s_idle.diagnostics = diagnose_service(s_idle, current_uid=os.getuid())
+    assert [d.code for d in s_idle.diagnostics] == ["SERVICE_HEALTHY"]
+    assert "12 run(s)" in s_idle.diagnostics[0].detail
+
+    # 3. Loaded, no PID, state = spawn scheduled -> SPAWN_SCHEDULED (ERROR, FAILED)
+    s_sched = ServiceInfo(
+        label="com.test.waiting",
+        scope=ServiceScope.USER_AGENT,
+        domain_target="gui/501",
+        plist_path=p_wait,
+        pid=None,
+        last_exit_status=None,
+        loaded=True,
+        plist_data=plistlib.loads(p_wait.read_bytes()),
+        runtime_details={"state": "spawn scheduled", "runs": 5},
+    )
+    s_sched.diagnostics = diagnose_service(s_sched, current_uid=os.getuid())
+    assert any(d.code == "SPAWN_SCHEDULED" and d.severity == Severity.ERROR for d in s_sched.diagnostics)
+    assert s_sched.state == ServiceState.FAILED
+
+    # 4. Loaded with RunAtLoad=True, runs=0, never exited -> SPAWN_FAILED_NEVER_RAN (ERROR, FAILED)
+    p_runatload = _write_plist(
+        tmp_path / "com.test.neverran.plist",
+        {"Label": "com.test.neverran", "ProgramArguments": [str(exe)], "RunAtLoad": True},
+    )
+    s_never = ServiceInfo(
+        label="com.test.neverran",
+        scope=ServiceScope.USER_AGENT,
+        domain_target="gui/501",
+        plist_path=p_runatload,
+        pid=None,
+        last_exit_status=None,
+        loaded=True,
+        plist_data=plistlib.loads(p_runatload.read_bytes()),
+        runtime_details={"state": "not running", "runs": 0, "last exit code": "(never exited)"},
+    )
+    s_never.diagnostics = diagnose_service(s_never, current_uid=os.getuid())
+    assert any(d.code == "SPAWN_FAILED_NEVER_RAN" and d.severity == Severity.ERROR for d in s_never.diagnostics)
+    assert s_never.state == ServiceState.FAILED
+
+    # 5. Conditional KeepAlive dict with runs=0 -> WAITING_FOR_FIRST_TRIGGER (not SPAWN_FAILED_NEVER_RAN)
+    p_cond = _write_plist(
+        tmp_path / "com.test.cond.plist",
+        {
+            "Label": "com.test.cond",
+            "ProgramArguments": [str(exe)],
+            "KeepAlive": {"SuccessfulExit": False},
+        },
+    )
+    s_cond = ServiceInfo(
+        label="com.test.cond",
+        scope=ServiceScope.USER_AGENT,
+        domain_target="gui/501",
+        plist_path=p_cond,
+        pid=None,
+        last_exit_status=None,
+        loaded=True,
+        plist_data=plistlib.loads(p_cond.read_bytes()),
+        runtime_details={"state": "not running", "runs": 0, "last exit code": "(never exited)"},
+    )
+    s_cond.diagnostics = diagnose_service(s_cond, current_uid=os.getuid())
+    codes_cond = [d.code for d in s_cond.diagnostics]
+    assert "WAITING_FOR_FIRST_TRIGGER" in codes_cond
+    assert "SPAWN_FAILED_NEVER_RAN" not in codes_cond
+
+    # 6. last terminating signal from launchctl print with last_exit_status=None -> KILLED_BY_SIGNAL (ERROR)
+    s_sig = ServiceInfo(
+        label="com.test.crashed",
+        scope=ServiceScope.USER_AGENT,
+        domain_target="gui/501",
+        plist_path=p_wait,
+        pid=None,
+        last_exit_status=None,
+        loaded=True,
+        plist_data=plistlib.loads(p_wait.read_bytes()),
+        runtime_details={
+            "state": "not running",
+            "runs": 1,
+            "last terminating signal": "Segmentation fault: 11",
+        },
+    )
+    s_sig.diagnostics = diagnose_service(s_sig, current_uid=os.getuid())
+    assert any(d.code == "KILLED_BY_SIGNAL" and d.severity == Severity.ERROR for d in s_sig.diagnostics)
+    assert s_sig.state == ServiceState.FAILED
+
+    # refresh_service_diagnostics backfills runtime exit status and updates diagnostics
+    s_refresh = ServiceInfo(
+        label="com.test.waiting",
+        scope=ServiceScope.USER_AGENT,
+        domain_target="gui/501",
+        plist_path=p_wait,
+        pid=None,
+        last_exit_status=None,
+        loaded=True,
+        plist_data=plistlib.loads(p_wait.read_bytes()),
+    )
+    sample_print = "gui/501/com.test.waiting = {\n\tstate = not running\n\truns = 4\n\tlast exit code = 78\n}\n"
+    with patch("lazylaunchd.core._run_launchctl", return_value=sample_print):
+        refresh_service_diagnostics(s_refresh, current_uid=os.getuid())
+    assert s_refresh.last_exit_status == 78
+    assert any(d.code == "NON_ZERO_EXIT" for d in s_refresh.diagnostics)
+
+
 # ---------------------------------------------------------------------------
 # Logs
 # ---------------------------------------------------------------------------
@@ -582,6 +726,11 @@ def test_cli_demo_list_doctor_and_json(capsys: pytest.CaptureFixture[str]) -> No
     assert rc_doc_ok == 0
     out_ok = capsys.readouterr().out
     assert "SERVICE_HEALTHY" in out_ok
+
+    rc_doc_wait = cli_main(["--demo", "--doctor", "com.dev.nightly-cleanup"])
+    assert rc_doc_wait == 0
+    out_wait = capsys.readouterr().out
+    assert "WAITING_FOR_FIRST_TRIGGER" in out_wait
 
     rc_doc_err = cli_main(["--demo", "--doctor", "com.company.backup-agent"])
     assert rc_doc_err == 1

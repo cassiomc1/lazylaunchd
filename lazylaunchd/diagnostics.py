@@ -34,6 +34,19 @@ _INTERPRETER_NAMES = {
     "pwsh",
 }
 _CRASH_SIGNALS = {4, 5, 6, 7, 8, 10, 11}  # SIGILL, SIGTRAP, SIGABRT, SIGEMT, SIGFPE, SIGBUS, SIGSEGV
+_CRASH_SIGNAL_NAMES = (
+    "segmentation fault",
+    "abort",
+    "bus error",
+    "illegal instruction",
+    "floating point",
+    "trace/bpt trap",
+    "sigsegv",
+    "sigabrt",
+    "sigbus",
+    "sigill",
+    "sigfpe",
+)
 
 
 def _is_script_interpreter(executable_name: str) -> bool:
@@ -529,10 +542,21 @@ def _diagnose_runtime_status(service: ServiceInfo, items: list[DiagnosticItem]) 
             )
         )
 
+    rt = service.runtime_details
+    rt_runs = rt.get("runs") if isinstance(rt.get("runs"), int) else None
+    rt_state = str(rt.get("state", "")).strip().lower()
+    rt_last_exit = rt.get("last exit code")
+    rt_term_signal = str(rt.get("last terminating signal", "")).strip()
+    never_exited = (rt_last_exit == "(never exited)") or (
+        rt_runs == 0 and service.last_exit_status is None
+    )
+
+    emitted_signal = False
     code = service.last_exit_status
     if code is not None and code != 0:
         explained = explain_exit_status(code)
         if code < 0:
+            emitted_signal = True
             sig = abs(code)
             is_running = service.pid is not None and service.pid > 0
             sev = (
@@ -576,6 +600,95 @@ def _diagnose_runtime_status(service: ServiceInfo, items: list[DiagnosticItem]) 
                 )
             )
 
+    if rt_term_signal and not emitted_signal:
+        is_running = service.pid is not None and service.pid > 0
+        is_crash = any(tok in rt_term_signal.lower() for tok in _CRASH_SIGNAL_NAMES)
+        sev = (
+            Severity.ERROR
+            if (is_crash and not is_running)
+            else Severity.INFO
+            if is_running
+            else Severity.WARNING
+        )
+        items.append(
+            DiagnosticItem(
+                severity=sev,
+                code="KILLED_BY_SIGNAL",
+                title=f"Last run terminated by signal ({rt_term_signal})",
+                detail=(
+                    f"`launchctl print` recorded last terminating signal '{rt_term_signal}'. "
+                    "SIGSEGV/SIGABRT indicates a process crash."
+                ),
+                fix_hint="Inspect StandardErrorPath and macOS Unified Logs ([2] / [L]).",
+            )
+        )
+
+    if service.loaded and service.pid is None and rt_state == "spawn scheduled":
+        runs_note = f" across {rt_runs} run(s)" if rt_runs is not None else ""
+        items.append(
+            DiagnosticItem(
+                severity=Severity.ERROR,
+                code="SPAWN_SCHEDULED",
+                title="launchd is retrying a failed spawn (spawn scheduled)",
+                detail=(
+                    f"Service is loaded with no active PID and launchd state 'spawn scheduled'{runs_note}, "
+                    "indicating launchd is throttling or retrying after spawn failure."
+                ),
+                fix_hint="Inspect Logs ([2] / [L]) or press [s] to kickstart manually.",
+            )
+        )
+
+    if (
+        service.loaded
+        and service.pid is None
+        and not service.is_disabled
+        and not service.plist_error
+        and rt_runs == 0
+        and never_exited
+        and (service.run_at_load or service.keep_alive is True)
+        and rt_state != "spawn scheduled"
+    ):
+        items.append(
+            DiagnosticItem(
+                severity=Severity.ERROR,
+                code="SPAWN_FAILED_NEVER_RAN",
+                title="Loaded with RunAtLoad/KeepAlive enabled, yet never ran (0 runs)",
+                detail=(
+                    "launchd recorded runs = 0 and never exited even though the plist requests immediate startup. "
+                    "The spawn attempt failed or launch conditions were not met."
+                ),
+                fix_hint="Verify executable/PATH/permissions above, inspect Unified Logs ([L]), or press [s] to kickstart.",
+            )
+        )
+
+    if (
+        service.loaded
+        and service.pid is None
+        and not service.is_disabled
+        and not service.plist_error
+        and not any(d.severity == Severity.ERROR for d in items)
+        and not (service.run_at_load or service.keep_alive is True)
+        and (rt_runs == 0 or (rt_runs is None and service.last_exit_status is None))
+    ):
+        detail = (
+            f"launchd reports runs = 0 (never exited yet). No errors detected; "
+            f"the job is idle waiting for its trigger ({service.schedule_summary})."
+            if rt_runs == 0
+            else (
+                "Service is loaded with no active PID and no recorded exits yet. "
+                f"Likely waiting for its first trigger ({service.schedule_summary})."
+            )
+        )
+        items.append(
+            DiagnosticItem(
+                severity=Severity.INFO,
+                code="WAITING_FOR_FIRST_TRIGGER",
+                title="Loaded and waiting for its first trigger (never run yet)",
+                detail=detail,
+                fix_hint="Normal until the trigger fires; press [s] to kickstart a manual test run.",
+            )
+        )
+
     if (
         not service.plist_error
         and service.plist_data
@@ -614,7 +727,23 @@ def diagnose_service(
         if service.state == ServiceState.RUNNING:
             summary = f"Service is actively running under PID {service.pid}."
         elif service.state == ServiceState.LOADED:
-            summary = "Service is loaded in launchd and last exited cleanly (0)."
+            rt_runs = (
+                service.runtime_details.get("runs")
+                if isinstance(service.runtime_details.get("runs"), int)
+                else None
+            )
+            if any(d.code == "WAITING_FOR_FIRST_TRIGGER" for d in items):
+                summary = (
+                    "Service is loaded and waiting for its first trigger "
+                    "(0 runs so far; no errors detected)."
+                )
+            elif rt_runs is not None and rt_runs > 0:
+                summary = (
+                    f"Service is loaded, completed {rt_runs} run(s), "
+                    "and last exited cleanly (0)."
+                )
+            else:
+                summary = "Service is loaded in launchd and last exited cleanly (0)."
         elif service.state == ServiceState.UNLOADED:
             summary = "Plist configuration looks valid; service is currently unloaded."
         else:

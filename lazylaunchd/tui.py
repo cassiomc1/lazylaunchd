@@ -45,6 +45,7 @@ from lazylaunchd.core import (
     build_demo_services,
     discover_services,
     load_runtime_details,
+    refresh_service_diagnostics,
 )
 from lazylaunchd.logs import format_log_line_rich, read_service_logs
 from lazylaunchd.models import (
@@ -845,6 +846,18 @@ class LazyLaunchdApp(App[None]):
             )
             return
 
+        if (
+            self.active_tab == "diagnostics"
+            and svc.loaded
+            and svc.pid is None
+            and not svc.runtime_details
+            and not self.demo
+        ):
+            prev_state = svc.state
+            refresh_service_diagnostics(svc)
+            if svc.state != prev_state:
+                self._update_top_bar()
+
         pid_str = str(svc.pid) if svc.pid else "-"
         plist_str = str(svc.plist_path) if svc.plist_path else "(runtime-only, no plist on disk)"
         sudo_badge = " [yellow](sudo)[/yellow]" if svc.requires_sudo else ""
@@ -901,6 +914,11 @@ class LazyLaunchdApp(App[None]):
         meta.add_row("Stderr", svc.stderr_path or "(not configured)")
         meta.add_row("Schedule", svc.schedule_summary)
         meta.add_row("Disabled", "Yes" if svc.is_disabled else "No")
+        if svc.runtime_details:
+            if "state" in svc.runtime_details:
+                meta.add_row("Launchd State", str(svc.runtime_details["state"]))
+            if "runs" in svc.runtime_details:
+                meta.add_row("Runs", str(svc.runtime_details["runs"]))
         blocks.append(Panel(meta, title="[bold]Configuration Summary[/bold]", border_style="#30363d"))
         return Group(*blocks)
 

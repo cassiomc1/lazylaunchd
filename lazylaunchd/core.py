@@ -30,6 +30,7 @@ __all__ = [
     "parse_launchctl_domain_services",
     "parse_launchctl_list",
     "parse_launchctl_print",
+    "refresh_service_diagnostics",
     "short_exit_status",
 ]
 
@@ -231,22 +232,46 @@ def _run_launchctl(args: list[str], *, timeout: float = 4.0) -> str:
         return ""
 
 
-def load_runtime_details(service: ServiceInfo) -> dict[str, Any]:
+def load_runtime_details(service: ServiceInfo, *, force: bool = False) -> dict[str, Any]:
     """Fetch and cache `launchctl print <domain>/<label>` details for a service."""
-    if service.demo_stdout is not None or service.demo_stderr is not None or service.demo_unified_logs is not None:
+    is_demo = (
+        service.demo_stdout is not None
+        or service.demo_stderr is not None
+        or service.demo_unified_logs is not None
+    )
+    if is_demo:
         return service.runtime_details
-    if not service.loaded and not service.runtime_details:
-        out = _run_launchctl(["print", service.service_target], timeout=3.0)
-        if not out:
-            return {}
-        parsed = parse_launchctl_print(out)
-        service.runtime_details = parsed
-        return parsed
+    if service.runtime_details and not force:
+        return service.runtime_details
     out = _run_launchctl(["print", service.service_target], timeout=3.0)
     if out:
         parsed = parse_launchctl_print(out)
         service.runtime_details = parsed
+        return parsed
     return service.runtime_details
+
+
+def refresh_service_diagnostics(
+    service: ServiceInfo,
+    *,
+    fetch_runtime: bool = True,
+    current_uid: int | None = None,
+) -> list[DiagnosticItem]:
+    """Enrich a service with live `launchctl print` runtime data and re-run diagnostics."""
+    is_demo = (
+        service.demo_stdout is not None
+        or service.demo_stderr is not None
+        or service.demo_unified_logs is not None
+    )
+    if fetch_runtime and service.loaded and not is_demo:
+        load_runtime_details(service)
+
+    rt_exit = service.runtime_details.get("last exit code")
+    if service.last_exit_status is None and isinstance(rt_exit, int):
+        service.last_exit_status = rt_exit
+
+    service.diagnostics = diagnose_service(service, current_uid=current_uid)
+    return service.diagnostics
 
 
 def _read_plist_file(path: Path) -> tuple[dict[str, Any], str | None, str]:
@@ -555,6 +580,27 @@ def build_demo_services(uid: int | None = None) -> list[ServiceInfo]:
 </plist>
 """
 
+    nightly_plist = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dev.nightly-cleanup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/true</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+</dict>
+</plist>
+"""
+
     services = [
         ServiceInfo(
             label="com.prtg.monitor",
@@ -625,6 +671,13 @@ def build_demo_services(uid: int | None = None) -> list[ServiceInfo]:
                     title="Last run exited with 127 (Command not found)",
                     detail="launchd recorded last exit status 127 across 14 restarts.",
                     fix_hint="Press [E] to edit ProgramArguments[0] to an absolute path.",
+                ),
+                DiagnosticItem(
+                    severity=Severity.ERROR,
+                    code="SPAWN_SCHEDULED",
+                    title="launchd is retrying a failed spawn (spawn scheduled)",
+                    detail="Service is loaded with no active PID and launchd state 'spawn scheduled' across 14 run(s).",
+                    fix_hint="Inspect Logs ([2] / [L]) or press [s] to kickstart manually.",
                 ),
             ],
             demo_stdout="",
@@ -719,6 +772,39 @@ def build_demo_services(uid: int | None = None) -> list[ServiceInfo]:
                 )
             ],
             demo_stdout="1:M 22 Nov 2026 09:42:10.123 * Ready to accept connections tcp\n",
+            demo_stderr="",
+        ),
+        ServiceInfo(
+            label="com.dev.nightly-cleanup",
+            scope=ServiceScope.USER_AGENT,
+            domain_target=gui_domain,
+            plist_path=home / "Library/LaunchAgents/com.dev.nightly-cleanup.plist",
+            pid=None,
+            last_exit_status=None,
+            loaded=True,
+            disabled_in_db=False,
+            plist_data=plistlib.loads(nightly_plist.encode()),
+            raw_plist_text=nightly_plist,
+            runtime_details={"state": "not running", "runs": 0, "last exit code": "(never exited)"},
+            diagnostics=[
+                DiagnosticItem(
+                    severity=Severity.INFO,
+                    code="WAITING_FOR_FIRST_TRIGGER",
+                    title="Loaded and waiting for its first trigger (never run yet)",
+                    detail=(
+                        "launchd reports runs = 0 (never exited yet). No errors detected; "
+                        "the job is idle waiting for its trigger (Calendar)."
+                    ),
+                    fix_hint="Normal until the trigger fires; press [s] to kickstart a manual test run.",
+                ),
+                DiagnosticItem(
+                    severity=Severity.OK,
+                    code="SERVICE_HEALTHY",
+                    title="Configuration looks healthy",
+                    detail="Service is loaded and waiting for its first trigger (0 runs so far; no errors detected).",
+                ),
+            ],
+            demo_stdout="",
             demo_stderr="",
         ),
         ServiceInfo(
